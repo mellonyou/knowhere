@@ -217,9 +217,12 @@ void exhaustive_inner_product_seq_impl(
 
 #ifdef KNOWHERE_WITH_DNNL
     if (is_dnnl_enabled()) {
-        float *res_arr = NULL;
+        float *res_arr = (float*)malloc(nx * ny * sizeof(float));
+        if (res_arr == NULL) {
+            FAISS_THROW_MSG("Malloc res_arr failed, res_arr = NULL\n");
+        }
 
-        fvec_inner_product_batch(nx, d, ny, d, const_cast<float*>(x), const_cast<float*>(y), &res_arr);
+        fvec_inner_product_batch(nx, d, ny, d, const_cast<float*>(x), const_cast<float*>(y), res_arr);
         if (res_arr == NULL) {
             FAISS_THROW_MSG("Onednn Inner Product failed, res_arr = NULL\n");
         }
@@ -236,6 +239,7 @@ void exhaustive_inner_product_seq_impl(
             }
             resi.end();
         }
+        free(res_arr);
     } else {
 #endif
 #pragma omp parallel num_threads(nt)

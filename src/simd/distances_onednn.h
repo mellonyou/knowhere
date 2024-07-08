@@ -90,63 +90,23 @@ static void library_load() {
  * @return None
  */
 
-enum BASE_DATA_STATE {
-    INIT,
-    MODIFIED,
-    PREPARE,
-    READY
-};
-
-class BaseData {
- public:
-    static std::atomic<BASE_DATA_STATE>& getState() {
-        static std::atomic<BASE_DATA_STATE> is_base_changed(BASE_DATA_STATE::INIT);
-        return is_base_changed;
-    }
-};
-
-static dnnl::memory bf16_mem2;
-static pthread_rwlock_t rwlock = PTHREAD_RWLOCK_INITIALIZER;
-
 struct inner_product_desc {
-    uint32_t xrow;
-    uint32_t xcol;
-    uint32_t yrow;
-    uint32_t ycol;
-    float* in_f32_1;
-    float* in_f32_2;
-    float* out_f32;
-    dnnl::memory::desc f32_md1;
-    dnnl::memory::desc f32_md2;
-    dnnl::memory::desc f32_dst_md2;
-    dnnl::memory f32_mem1;
-    dnnl::memory f32_mem2;
-    dnnl::memory f32_dst_mem;
+    void execute(size_t xrow, size_t xcol, size_t yrow, size_t ycol,
+        float* in_f32_1, float* in_f32_2, float* out_f32) {
+        dnnl::inner_product_forward::primitive_desc inner_product_pd;
+        dnnl::inner_product_forward inner_product_prim;
 
-    dnnl::memory::desc bf16_md1;
-    dnnl::memory::desc bf16_md2;
+        dnnl::memory::desc f32_md1;
+        dnnl::memory::desc f32_md2;
+        dnnl::memory::desc f32_dst_md2;
+        dnnl::memory f32_mem1;
+        dnnl::memory f32_mem2;
+        dnnl::memory f32_dst_mem;
 
-    dnnl::inner_product_forward::primitive_desc inner_product_pd;
-    dnnl::inner_product_forward inner_product_prim;
-
-    dnnl::memory bf16_mem1;
-
-    bool is_same(uint32_t xrow, uint32_t xcol, uint32_t yrow, uint32_t ycol,
-      float* in_f32_1, float* in_f32_2) {
-      return this->xrow == xrow && this->xcol == xcol &&
-             this->yrow == yrow && this->ycol == ycol &&
-             this->in_f32_2 == in_f32_2;
-    }
-
-    void init(uint32_t xrow, uint32_t xcol, uint32_t yrow, uint32_t ycol,
-		float* in_f32_1, float* in_f32_2) {
-        if (is_same(xrow, xcol, yrow, ycol, in_f32_1, in_f32_2)) {
-            if (this->in_f32_1 != in_f32_1) {
-                this->in_f32_1 = in_f32_1;
-                f32_mem1 = dnnl::memory(f32_md1, cpu_engine, in_f32_1);
-            }
-            return;
-        }
+        dnnl::memory::desc bf16_md1;
+        dnnl::memory::desc bf16_md2;
+        dnnl::memory bf16_mem1;
+        dnnl::memory bf16_mem2;
 
         f32_md1 = dnnl::memory::desc({xrow, xcol}, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
         f32_md2 = dnnl::memory::desc({yrow, ycol}, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
@@ -154,7 +114,7 @@ struct inner_product_desc {
 
         f32_mem1 = dnnl::memory(f32_md1, cpu_engine, in_f32_1);
         f32_mem2 = dnnl::memory(f32_md2, cpu_engine, in_f32_2);
-        f32_dst_mem = dnnl::memory(f32_dst_md2, cpu_engine);
+        f32_dst_mem = dnnl::memory(f32_dst_md2, cpu_engine, out_f32);
 
         // inner memory bf16
         bf16_md1 = dnnl::memory::desc({xrow, xcol}, dnnl::memory::data_type::bf16, dnnl::memory::format_tag::any);
@@ -167,52 +127,19 @@ struct inner_product_desc {
         inner_product_prim = dnnl::inner_product_forward(inner_product_pd);
 
         bf16_mem1 = dnnl::memory(inner_product_pd.src_desc(), cpu_engine);
-
-        // update state for new base data
-        if (this->in_f32_2 != in_f32_2) {
-            BaseData::getState().store(BASE_DATA_STATE::MODIFIED);
-        }
-
-        this->xrow = xrow;
-        this->xcol = xcol;
-        this->yrow = yrow;
-        this->ycol = ycol;
-        this->in_f32_1 = in_f32_1;
-        this->in_f32_2 = in_f32_2;
-    }
-
-    void execute(float** out_f32) {
         dnnl::reorder(f32_mem1, bf16_mem1).execute(engine_stream, f32_mem1, bf16_mem1);
-        BASE_DATA_STATE expected = BASE_DATA_STATE::MODIFIED;
 
-        if (BaseData::getState().compare_exchange_strong(expected, BASE_DATA_STATE::PREPARE)) {
-            pthread_rwlock_wrlock(&rwlock);
+        bf16_mem2 = dnnl::memory(inner_product_pd.weights_desc(), cpu_engine);
+        dnnl::reorder(f32_mem2, bf16_mem2).execute(engine_stream, f32_mem2, bf16_mem2);
 
-            bf16_mem2 = dnnl::memory(inner_product_pd.weights_desc(), cpu_engine,  DNNL_MEMORY_ALLOCATE);
-            dnnl::reorder(f32_mem2, bf16_mem2).execute(engine_stream, f32_mem2, bf16_mem2);
-            inner_product_prim.execute(engine_stream, {{DNNL_ARG_SRC, bf16_mem1},
-                                                          {DNNL_ARG_WEIGHTS, bf16_mem2},
-                                                          {DNNL_ARG_DST, f32_dst_mem}});
-            pthread_rwlock_unlock(&rwlock);
-            BaseData::getState().store(BASE_DATA_STATE::READY);
-        } else {
-            while(BaseData::getState() != BASE_DATA_STATE::READY) {
-                usleep(50000);
-            }
-
-            pthread_rwlock_rdlock(&rwlock);
-            inner_product_prim.execute(engine_stream, {{DNNL_ARG_SRC, bf16_mem1},
-                                                      {DNNL_ARG_WEIGHTS, bf16_mem2},
-                                                      {DNNL_ARG_DST, f32_dst_mem}});
-            pthread_rwlock_unlock(&rwlock);
-        }
-
-        *out_f32 = (float*) f32_dst_mem.get_data_handle();
+        inner_product_prim.execute(engine_stream, {{DNNL_ARG_SRC, bf16_mem1},
+                {DNNL_ARG_WEIGHTS, bf16_mem2},
+                {DNNL_ARG_DST, f32_dst_mem}});
     }
 };
 
-void fvec_f32bf16f32_inner_product_onednn(uint32_t xrow, uint32_t xcol, uint32_t yrow, uint32_t ycol,
-                                          float* in_f32_1, float* in_f32_2, float** out_f32);
+void fvec_f32bf16f32_inner_product_onednn(size_t xrow, size_t xcol, size_t yrow, size_t ycol,
+                                          float* in_f32_1, float* in_f32_2, float* out_f32);
 
 } // namespace faiss
 

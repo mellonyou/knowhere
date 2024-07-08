@@ -383,11 +383,11 @@ BruteForce::RangeSearch(const DataSetPtr base_dataset, const DataSetPtr query_da
         if (is_sparse) {
             std::vector<folly::Future<Status>> futs;
             futs.reserve(nq);
-            for (int i = 0; i < nq; ++i) {
+            for (size_t i = 0; i < nq; ++i) {
                 futs.emplace_back(pool->push([&, index = i] {
                     auto cur_query = (const sparse::SparseRow<float>*)xq + index;
                     auto xb_sparse = (const sparse::SparseRow<float>*)xb;
-                    for (int j = 0; j < nb; ++j) {
+                    for (size_t j = 0; j < nb; ++j) {
                         if (!bitset.empty() && bitset.test(j)) {
                             continue;
                         }
@@ -411,7 +411,7 @@ BruteForce::RangeSearch(const DataSetPtr base_dataset, const DataSetPtr query_da
             faiss::IDSelector* id_selector = (bitset.empty()) ? nullptr : &bw_idselector;
 
             faiss::range_search_inner_product((const float*)xq, (const float*)xb, dim, nq, nb, radius, &res, id_selector);
-            for (int i = 0; i < nq; ++i) {
+            for (size_t i = 0; i < nq; ++i) {
                 auto elem_cnt = res.lims[nq];
                 result_dist_array[i].resize(elem_cnt);
                 result_id_array[i].resize(elem_cnt);
