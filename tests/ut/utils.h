@@ -37,6 +37,17 @@ struct DisPairLess {
 };
 
 inline knowhere::DataSetPtr
+GenBFloat16DataSet(int rows, int dim, int seed = 42) {
+    std::mt19937 rng(seed);
+    std::uniform_int_distribution<> distrib(0.0, 100.0);
+    uint16_t* ts = new uint16_t[rows * dim];
+    for (int i = 0; i < rows * dim; ++i) ts[i] = (uint16_t)distrib(rng);
+    auto ds = knowhere::GenDataSet(rows, dim, ts);
+    ds->SetIsOwner(true);
+    return ds;
+}
+
+inline knowhere::DataSetPtr
 GenDataSet(int rows, int dim, int seed = 42) {
     std::mt19937 rng(seed);
     std::uniform_int_distribution<> distrib(0.0, 100.0);
@@ -71,6 +82,18 @@ CopyDataSet(knowhere::DataSetPtr dataset, const int64_t copy_rows) {
     return ds;
 }
 
+inline knowhere::DataSetPtr
+CopyBFloat16DataSet(knowhere::DataSetPtr dataset, const int64_t copy_rows) {
+    REQUIRE(!dataset->GetIsSparse());
+    auto rows = copy_rows;
+    auto dim = dataset->GetDim();
+    auto data = dataset->GetTensor();
+    uint16_t* ts = new uint16_t[rows * dim];
+    memcpy(ts, data, rows * dim * sizeof(uint16_t));
+    auto ds = knowhere::GenDataSet(rows, dim, ts);
+    ds->SetIsOwner(true);
+    return ds;
+}
 inline knowhere::DataSetPtr
 GenBinDataSet(int rows, int dim, int seed = 42) {
     std::mt19937 rng(seed);
