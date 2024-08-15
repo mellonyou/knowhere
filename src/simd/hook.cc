@@ -68,6 +68,7 @@ decltype(ivec_L2sqr) ivec_L2sqr = ivec_L2sqr_ref;
 
 #ifdef KNOWHERE_WITH_DNNL
 decltype (fvec_inner_product_batch) fvec_inner_product_batch = fvec_f32bf16f32_inner_product_onednn;
+decltype (fvec_inner_product_bf16_batch) fvec_inner_product_bf16_batch = fvec_bf16bf16f32_inner_product_onednn;
 #endif
 
 #if defined(__x86_64__)
@@ -95,6 +96,10 @@ static std::mutex patch_bf16_mutex;
 void
 enable_patch_for_fp32_bf16() {
     std::lock_guard<std::mutex> lock(patch_bf16_mutex);
+#ifdef KNOWHERE_WITH_DNNL
+    fvec_inner_product_bf16_batch = fvec_bf16bf16f32_inner_product_onednn;
+#endif
+
 #if defined(__x86_64__)
     if (use_avx512 && cpu_support_avx512()) {
         // Cloud branch
@@ -126,6 +131,10 @@ enable_patch_for_fp32_bf16() {
 void
 disable_patch_for_fp32_bf16() {
     std::lock_guard<std::mutex> lock(patch_bf16_mutex);
+#ifdef KNOWHERE_WITH_DNNL
+    fvec_inner_product_batch = fvec_f32bf16f32_inner_product_onednn;
+#endif
+
 #if defined(__x86_64__)
     if (use_avx512 && cpu_support_avx512()) {
         // Cloud branch

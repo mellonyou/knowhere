@@ -91,7 +91,7 @@ static void library_load() {
  */
 
 struct inner_product_desc {
-    void execute(size_t xrow, size_t xcol, size_t yrow, size_t ycol,
+    void execute(uint32_t xrow, uint32_t xcol, uint32_t yrow, uint32_t ycol,
         float* in_f32_1, float* in_f32_2, float* out_f32) {
         dnnl::inner_product_forward::primitive_desc inner_product_pd;
         dnnl::inner_product_forward inner_product_prim;
@@ -135,10 +135,48 @@ struct inner_product_desc {
         inner_product_prim.execute(engine_stream, {{DNNL_ARG_SRC, bf16_mem1},
                 {DNNL_ARG_WEIGHTS, bf16_mem2},
                 {DNNL_ARG_DST, f32_dst_mem}});
+
+    }
+
+    void execute_bf16(uint32_t xrow, uint32_t xcol, uint32_t yrow, uint32_t ycol,
+        uint16_t* in_bf16_1, uint16_t* in_bf16_2, float* out_f32) {
+        dnnl::inner_product_forward::primitive_desc inner_product_pd;
+        dnnl::inner_product_forward inner_product_prim;
+
+        dnnl::memory::desc bf16_md1;
+        dnnl::memory::desc bf16_md2;
+        dnnl::memory::desc f32_dst_md;
+
+        dnnl::memory bf16_mem1;
+        dnnl::memory bf16_mem2;
+        dnnl::memory f32_dst_mem;
+
+        bf16_md1 = dnnl::memory::desc({xrow, xcol}, dnnl::memory::data_type::f16, dnnl::memory::format_tag::any);
+        bf16_md2 = dnnl::memory::desc({yrow, ycol}, dnnl::memory::data_type::f16, dnnl::memory::format_tag::any);
+        f32_dst_md = dnnl::memory::desc({xrow, yrow}, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
+
+        f32_dst_mem = dnnl::memory(f32_dst_md, cpu_engine, out_f32);
+
+        inner_product_pd = dnnl::inner_product_forward::primitive_desc(
+              cpu_engine, dnnl::prop_kind::forward_training,
+              bf16_md1, bf16_md2, f32_dst_md);
+
+        inner_product_prim = dnnl::inner_product_forward(inner_product_pd);
+
+        bf16_mem1 = dnnl::memory(inner_product_pd.src_desc(), cpu_engine, in_bf16_1);
+        bf16_mem2 = dnnl::memory(inner_product_pd.weights_desc(), cpu_engine, in_bf16_2);
+
+        inner_product_prim.execute(engine_stream, {{DNNL_ARG_SRC, bf16_mem1},
+                {DNNL_ARG_WEIGHTS, bf16_mem2},
+                {DNNL_ARG_DST, f32_dst_mem}});
+
     }
 };
 
-void fvec_f32bf16f32_inner_product_onednn(size_t xrow, size_t xcol, size_t yrow, size_t ycol,
+void fvec_bf16bf16f32_inner_product_onednn(uint32_t xrow, uint32_t xcol, uint32_t yrow, uint32_t ycol,
+                                       uint16_t* in_bf16_1, uint16_t* in_bf16_2, float* out_f32);
+
+void fvec_f32bf16f32_inner_product_onednn(uint32_t xrow, uint32_t xcol, uint32_t yrow, uint32_t ycol,
                                           float* in_f32_1, float* in_f32_2, float* out_f32);
 
 } // namespace faiss

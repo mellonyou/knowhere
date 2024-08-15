@@ -47,9 +47,11 @@ BruteForce::Search(const DataSetPtr base_dataset, const DataSetPtr query_dataset
                    const BitsetView& bitset) {
     DataSetPtr base(base_dataset);
     DataSetPtr query(query_dataset);
-    if constexpr (!std::is_same_v<DataType, typename MockData<DataType>::type>) {
-        base = data_type_conversion<DataType, typename MockData<DataType>::type>(*base_dataset);
-        query = data_type_conversion<DataType, typename MockData<DataType>::type>(*query_dataset);
+    if (!faiss::is_dnnl_enabled()) {
+        if constexpr (!std::is_same_v<DataType, typename MockData<DataType>::type>) {
+            base = data_type_conversion<DataType, typename MockData<DataType>::type>(*base_dataset);
+            query = data_type_conversion<DataType, typename MockData<DataType>::type>(*query_dataset);
+        }
     }
     auto xb = base->GetTensor();
     auto nb = base->GetRows();
@@ -96,7 +98,10 @@ BruteForce::Search(const DataSetPtr base_dataset, const DataSetPtr query_dataset
         faiss::IDSelector* id_selector = (bitset.empty()) ? nullptr : &bw_idselector;
 
         faiss::float_minheap_array_t buf{(size_t)nq, (size_t)topk, labels.get(), distances.get()};
-        faiss::knn_inner_product((const float*)xq, (const float*)xb, dim, nq, nb, &buf, id_selector);
+        if (std::is_same_v<DataType, knowhere::bf16>)
+            faiss::knn_inner_product_bf16((const uint16_t*)xq, (const uint16_t*)xb, dim, nq, nb, &buf, id_selector);
+        else
+            faiss::knn_inner_product((const float*)xq, (const float*)xb, dim, nq, nb, &buf, id_selector);
     } else {
 #endif
     auto pool = ThreadPool::GetGlobalSearchThreadPool();
@@ -232,7 +237,10 @@ BruteForce::SearchWithBuf(const DataSetPtr base_dataset, const DataSetPtr query_
         faiss::IDSelector* id_selector = (bitset.empty()) ? nullptr : &bw_idselector;
 
         faiss::float_minheap_array_t buf{(size_t)nq, (size_t)topk, labels, distances};
-        faiss::knn_inner_product((const float*)xq, (const float*)xb, dim, nq, nb, &buf, id_selector);
+        if (std::is_same_v<DataType, knowhere::bf16>)
+            faiss::knn_inner_product_bf16((const uint16_t*)xq, (const uint16_t*)xb, dim, nq, nb, &buf, id_selector);
+        else
+            faiss::knn_inner_product((const float*)xq, (const float*)xb, dim, nq, nb, &buf, id_selector);
     } else {
 #endif
     auto pool = ThreadPool::GetGlobalSearchThreadPool();
@@ -410,7 +418,11 @@ BruteForce::RangeSearch(const DataSetPtr base_dataset, const DataSetPtr query_da
             BitsetViewIDSelector bw_idselector(bitset);
             faiss::IDSelector* id_selector = (bitset.empty()) ? nullptr : &bw_idselector;
 
-            faiss::range_search_inner_product((const float*)xq, (const float*)xb, dim, nq, nb, radius, &res, id_selector);
+            if (std::is_same_v<DataType, knowhere::bf16>)
+                faiss::range_search_inner_product_bf16((const uint16_t*)xq, (const uint16_t*)xb, dim, nq, nb, radius, &res, id_selector);
+            else
+                faiss::range_search_inner_product((const float*)xq, (const float*)xb, dim, nq, nb, radius, &res, id_selector);
+
             for (size_t i = 0; i < nq; ++i) {
                 auto elem_cnt = res.lims[nq];
                 result_dist_array[i].resize(elem_cnt);
