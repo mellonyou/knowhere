@@ -211,6 +211,15 @@ void knn_inner_product(
         float_minheap_array_t* res,
         const IDSelector* sel = nullptr);
 
+void knn_inner_product_bf16(
+       const uint16_t* x,
+       const uint16_t* y,
+       size_t d,
+       size_t nx,
+       size_t ny,
+       float_minheap_array_t* res,
+       const IDSelector* sel = nullptr);
+
 /**  Return the k nearest neighors of each of the nx vectors x among the ny
  *  vector y, for the inner product metric.
  *
@@ -415,6 +424,16 @@ void range_search_inner_product(
         float radius,
         RangeSearchResult* result,
         const IDSelector* sel = nullptr);
+
+void range_search_inner_product_bf16(
+       const uint16_t* x,
+       const uint16_t* y,
+       size_t d,
+       size_t nx,
+       size_t ny,
+       float radius,
+       RangeSearchResult* result,
+       const IDSelector* sel = nullptr);
 
 // Knowhere-specific function
 void range_search_cosine(

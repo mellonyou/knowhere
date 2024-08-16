@@ -27,6 +27,10 @@
 #include <faiss/impl/ResultHandler.h>
 #include <faiss/utils/utils.h>
 
+#ifdef KNOWHERE_WITH_DNNL
+#include "simd/distances_onednn.h"
+#endif
+
 #ifndef FINTEGER
 #define FINTEGER long
 #endif
@@ -211,6 +215,33 @@ void exhaustive_inner_product_seq_impl(
     using SingleResultHandler = typename BlockResultHandler::SingleResultHandler;
     int nt = std::min(int(nx), omp_get_max_threads());
 
+#ifdef KNOWHERE_WITH_DNNL
+    if (is_dnnl_enabled()) {
+        float *res_arr = (float*)malloc(nx * ny * sizeof(float));
+        if (res_arr == NULL) {
+            FAISS_THROW_MSG("Malloc res_arr failed, res_arr = NULL\n");
+        }
+
+        fvec_inner_product_batch(nx, d, ny, d, const_cast<float*>(x), const_cast<float*>(y), res_arr);
+        if (res_arr == NULL) {
+            FAISS_THROW_MSG("Onednn Inner Product failed, res_arr = NULL\n");
+        }
+
+        SingleResultHandler resi(res);
+#pragma omp for
+        for (size_t i = 0; i < nx; i++) {
+            resi.begin(i);
+            for (size_t j = 0; j < ny; j++) {
+                if (selector.is_member(j)) {
+                    float ip = res_arr[i*ny + j];
+                    resi.add_result(ip, j);
+                }
+            }
+            resi.end();
+        }
+        free(res_arr);
+    } else {
+#endif
 #pragma omp parallel num_threads(nt)
     {
         SingleResultHandler resi(res);
@@ -235,6 +266,54 @@ void exhaustive_inner_product_seq_impl(
             resi.end();
         }
     }
+#ifdef KNOWHERE_WITH_DNNL
+    }
+#endif
+}
+
+template <class BlockResultHandler, class SelectorHelper>
+void exhaustive_inner_product_seq_bf16_impl(
+        const uint16_t* __restrict x,
+        const uint16_t* __restrict y,
+        size_t d,
+        size_t nx,
+        size_t ny,
+        BlockResultHandler& res,
+        const SelectorHelper selector) {
+    using SingleResultHandler = typename BlockResultHandler::SingleResultHandler;
+    int nt = std::min(int(nx), omp_get_max_threads());
+
+#ifdef KNOWHERE_WITH_DNNL
+    if (is_dnnl_enabled()) {
+        float *res_arr = (float*)malloc(nx * ny * sizeof(float));
+        if (res_arr == NULL) {
+            FAISS_THROW_MSG("Malloc res_arr failed, res_arr = NULL\n");
+        }
+
+        fvec_inner_product_bf16_batch(nx, d, ny, d, const_cast<uint16_t*>(x), const_cast<uint16_t*>(y), res_arr);
+        if (res_arr == NULL) {
+            FAISS_THROW_MSG("Onednn Inner Product failed, res_arr = NULL\n");
+        }
+
+        SingleResultHandler resi(res);
+#pragma omp for
+        for (size_t i = 0; i < nx; i++) {
+            resi.begin(i);
+            for (size_t j = 0; j < ny; j++) {
+                if (selector.is_member(j)) {
+                    float ip = res_arr[i*ny + j];
+                    resi.add_result(ip, j);
+                }
+            }
+            resi.end();
+        }
+        free(res_arr);
+    } else {
+#endif
+    FAISS_THROW_MSG("not supported");
+#ifdef KNOWHERE_WITH_DNNL
+    }
+#endif
 }
 
 template <class BlockResultHandler>
@@ -272,6 +351,44 @@ void exhaustive_inner_product_seq(
     // default case if no filter is needed or if it is empty
     IDSelectorAll helper;
     exhaustive_inner_product_seq_impl<BlockResultHandler, IDSelectorAll>(
+        x, y, d, nx, ny, res, helper);
+}
+
+template <class BlockResultHandler>
+void exhaustive_inner_product_seq_bf16(
+        const uint16_t* __restrict x,
+        const uint16_t* __restrict y,
+        size_t d,
+        size_t nx,
+        size_t ny,
+        BlockResultHandler& res,
+        const IDSelector* __restrict sel) {
+    // add different specialized cases here via introducing
+    //   helpers which are converted into templates.
+
+    // bitset.empty() translates into sel=nullptr
+
+    if (const auto* bitsetview_sel = dynamic_cast<const knowhere::BitsetViewIDSelector*>(sel)) {
+        // A specialized case for Knowhere
+        auto bitset = bitsetview_sel->bitset_view;
+        if (!bitset.empty()) {
+            BitsetViewSelectorHelper bitset_helper{bitset};
+            exhaustive_inner_product_seq_bf16_impl<BlockResultHandler, BitsetViewSelectorHelper>(
+                x, y, d, nx, ny, res, bitset_helper);
+            return;
+        }
+    }
+    else if (sel != nullptr) {
+        // default Faiss case if sel is defined
+        IDSelectorHelper ids_helper{sel};
+        exhaustive_inner_product_seq_bf16_impl<BlockResultHandler, IDSelectorHelper>(
+            x, y, d, nx, ny, res, ids_helper);
+        return;
+    }
+
+    // default case if no filter is needed or if it is empty
+    IDSelectorAll helper;
+    exhaustive_inner_product_seq_bf16_impl<BlockResultHandler, IDSelectorAll>(
         x, y, d, nx, ny, res, helper);
 }
 
@@ -572,6 +689,58 @@ void exhaustive_inner_product_blas(
     }
 }
 
+template <class BlockResultHandler>
+void exhaustive_inner_product_blas_bf16(
+        const uint16_t* x,
+        const uint16_t* y,
+        size_t d,
+        size_t nx,
+        size_t ny,
+        BlockResultHandler& res,
+        const IDSelector* sel) {
+    // BLAS does not like empty matrices
+    if (nx == 0 || ny == 0)
+        return;
+
+    /* block sizes */
+    const size_t bs_x = distance_compute_blas_query_bs;
+    const size_t bs_y = distance_compute_blas_database_bs;
+    std::unique_ptr<float[]> ip_block(new float[bs_x * bs_y]);
+
+#ifdef KNOWHERE_WITH_DNNL
+    for (size_t i0 = 0; i0 < nx; i0 += bs_x) {
+        size_t i1 = i0 + bs_x;
+        if (i1 > nx)
+            i1 = nx;
+
+        res.begin_multiple(i0, i1);
+
+        for (size_t j0 = 0; j0 < ny; j0 += bs_y) {
+            size_t j1 = j0 + bs_y;
+            if (j1 > ny)
+                j1 = ny;
+            /* compute the actual dot products */
+            if (is_dnnl_enabled()) {
+                FINTEGER nyi = j1 - j0, nxi = i1 - i0, di = d;
+                fvec_inner_product_bf16_batch(nxi, d, nyi, d,
+                    const_cast<uint16_t*>(x + i0 * d),
+                    const_cast<uint16_t*>(y + j0 * d),
+                    ip_block.get());
+            } else {
+                FAISS_THROW_MSG("not supported");
+            }
+
+            res.add_results(j0, j1, ip_block.get(), sel);
+        }
+        res.end_multiple();
+        InterruptCallback::check();
+    }
+#else
+	FAISS_THROW_MSG("not supported");
+#endif
+}
+
+
 // distance correction is an operator that can be applied to transform
 // the distances
 template <class BlockResultHandler>
@@ -855,6 +1024,25 @@ void knn_inner_product_select(
 }
 
 template <class BlockResultHandler>
+void knn_inner_product_select_bf16(
+        const uint16_t* x,
+        const uint16_t* y,
+        size_t d,
+        size_t nx,
+        size_t ny,
+        BlockResultHandler& res,
+        const IDSelector* sel) {
+    if (sel) {
+        exhaustive_inner_product_seq_bf16<BlockResultHandler>(
+                x, y, d, nx, ny, res, sel);
+    } else if (nx < distance_compute_blas_threshold) {
+        exhaustive_inner_product_seq_bf16<BlockResultHandler>(x, y, d, nx, ny, res, nullptr);
+    } else {
+        exhaustive_inner_product_blas_bf16<BlockResultHandler>(x, y, d, nx, ny, res, nullptr);
+    }
+}
+
+template <class BlockResultHandler>
 void knn_cosine_select(
         const float* x,
         const float* y,
@@ -931,6 +1119,46 @@ void knn_inner_product(
     }
 }
 
+void knn_inner_product_bf16(
+        const uint16_t* x,
+        const uint16_t* y,
+        size_t d,
+        size_t nx,
+        size_t ny,
+        size_t k,
+        float* vals,
+        int64_t* ids,
+        const IDSelector* sel) {
+    int64_t imin = 0;
+    if (auto selr = dynamic_cast<const IDSelectorRange*>(sel)) {
+        imin = std::max(selr->imin, int64_t(0));
+        int64_t imax = std::min(selr->imax, int64_t(ny));
+        ny = imax - imin;
+        y += d * imin;
+        sel = nullptr;
+    }
+    if (auto sela = dynamic_cast<const IDSelectorArray*>(sel)) {
+        FAISS_THROW_MSG("not supported");
+        return;
+    }
+
+    if (k < distance_compute_min_k_reservoir) {
+        HeapBlockResultHandler<CMin<float, int64_t>> res(nx, vals, ids, k);
+        knn_inner_product_select_bf16(x, y, d, nx, ny, res, sel);
+    } else {
+        ReservoirBlockResultHandler<CMin<float, int64_t>> res(nx, vals, ids, k);
+        knn_inner_product_select_bf16(x, y, d, nx, ny, res, sel);
+    }
+
+    if (imin != 0) {
+        for (size_t i = 0; i < nx * k; i++) {
+            if (ids[i] >= 0) {
+                ids[i] += imin;
+            }
+        }
+    }
+}
+
 void knn_inner_product(
         const float* x,
         const float* y,
@@ -941,6 +1169,18 @@ void knn_inner_product(
         const IDSelector* sel) {
     FAISS_THROW_IF_NOT(nx == res->nh);
     knn_inner_product(x, y, d, nx, ny, res->k, res->val, res->ids, sel);
+}
+
+void knn_inner_product_bf16(
+        const uint16_t* x,
+        const uint16_t* y,
+        size_t d,
+        size_t nx,
+        size_t ny,
+        float_minheap_array_t* res,
+        const IDSelector* sel) {
+    FAISS_THROW_IF_NOT(nx == res->nh);
+    knn_inner_product_bf16(x, y, d, nx, ny, res->k, res->val, res->ids, sel);
 }
 
 // computes and stores all IP distances into output. Output should be
@@ -1181,6 +1421,23 @@ void range_search_inner_product(
         exhaustive_inner_product_seq(x, y, d, nx, ny, resh, sel);
     } else {
         exhaustive_inner_product_blas(x, y, d, nx, ny, resh, sel);
+    }
+}
+
+void range_search_inner_product_bf16(
+        const uint16_t* x,
+        const uint16_t* y,
+        size_t d,
+        size_t nx,
+        size_t ny,
+        float radius,
+        RangeSearchResult* res,
+        const IDSelector* sel) {
+    RangeSearchBlockResultHandler<CMin<float, int64_t>> resh(res, radius);
+    if (nx < distance_compute_blas_threshold) {
+        exhaustive_inner_product_seq_bf16(x, y, d, nx, ny, resh, sel);
+    } else {
+        exhaustive_inner_product_blas_bf16(x, y, d, nx, ny, resh, sel);
     }
 }
 
