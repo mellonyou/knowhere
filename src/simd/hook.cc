@@ -29,6 +29,10 @@
 #include "instruction_set.h"
 #endif
 
+#ifdef KNOWHERE_WITH_DNNL
+#include "distances_onednn.h"
+#endif
+
 #include "distances_ref.h"
 #include "knowhere/log.h"
 namespace faiss {
@@ -61,6 +65,13 @@ decltype(fvec_L2sqr_batch_4) fvec_L2sqr_batch_4 = fvec_L2sqr_batch_4_ref;
 
 decltype(ivec_inner_product) ivec_inner_product = ivec_inner_product_ref;
 decltype(ivec_L2sqr) ivec_L2sqr = ivec_L2sqr_ref;
+
+// onednn distance
+#ifdef KNOWHERE_WITH_DNNL
+decltype (fvec_inner_product_batch) fvec_inner_product_batch = fvec_f32bf16f32_inner_product_onednn;
+decltype (fvec_inner_product_bf16_batch) fvec_inner_product_bf16_batch = fvec_bf16bf16f32_inner_product_onednn;
+#endif
+
 
 #if defined(__x86_64__)
 bool
@@ -150,6 +161,11 @@ void
 fvec_hook(std::string& simd_type) {
     static std::mutex hook_mutex;
     std::lock_guard<std::mutex> lock(hook_mutex);
+#ifdef KNOWHERE_WITH_DNNL
+    fvec_inner_product_batch = fvec_f32bf16f32_inner_product_onednn;
+    fvec_inner_product_bf16_batch = fvec_bf16bf16f32_inner_product_onednn;
+#endif
+	
 #if defined(__x86_64__)
     if (use_avx512 && cpu_support_avx512()) {
         fvec_inner_product = fvec_inner_product_avx512;
