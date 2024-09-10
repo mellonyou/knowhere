@@ -27,6 +27,10 @@
 #include "knowhere/sparse_utils.h"
 #include "knowhere/utils.h"
 
+#ifdef KNOWHERE_WITH_DNNL
+#include "simd/distances_onednn.h"
+#endif
+
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
 #include "knowhere/tracer.h"
 #endif
@@ -65,9 +69,13 @@ template <typename DataType>
 expected<DataSetPtr>
 BruteForce::Search(const DataSetPtr base_dataset, const DataSetPtr query_dataset, const Json& config,
                    const BitsetView& bitset) {
+#ifdef KNOWHERE_WITH_DNNL
+	DataSetPtr base(base_dataset);
+    DataSetPtr query(query_dataset);
+#else
     auto base = ConvertFromDataTypeIfNeeded<DataType>(base_dataset);
     auto query = ConvertFromDataTypeIfNeeded<DataType>(query_dataset);
-
+#endif
     auto xb = base->GetTensor();
     auto nb = base->GetRows();
     auto dim = base->GetDim();
@@ -107,6 +115,18 @@ BruteForce::Search(const DataSetPtr base_dataset, const DataSetPtr query_dataset
     auto labels = std::make_unique<int64_t[]>(nq * topk);
     auto distances = std::make_unique<float[]>(nq * topk);
 
+#ifdef KNOWHERE_WITH_DNNL
+    if (faiss::is_dnnl_enabled() && (faiss_metric_type == faiss::METRIC_INNER_PRODUCT) && (is_cosine == false)) {
+        BitsetViewIDSelector bw_idselector(bitset);
+        faiss::IDSelector* id_selector = (bitset.empty()) ? nullptr : &bw_idselector;
+
+        faiss::float_minheap_array_t buf{(size_t)nq, (size_t)topk, labels.get(), distances.get()};
+        if (std::is_same_v<DataType, knowhere::bf16>)
+            faiss::knn_inner_product_bf16((const uint16_t*)xq, (const uint16_t*)xb, dim, nq, nb, &buf, id_selector);
+        else
+            faiss::knn_inner_product((const float*)xq, (const float*)xb, dim, nq, nb, &buf, id_selector);
+    } else {
+#endif
     auto pool = ThreadPool::GetGlobalSearchThreadPool();
     std::vector<folly::Future<Status>> futs;
     futs.reserve(nq);
@@ -174,6 +194,10 @@ BruteForce::Search(const DataSetPtr base_dataset, const DataSetPtr query_dataset
     if (ret != Status::success) {
         return expected<DataSetPtr>::Err(ret, "failed to brute force search");
     }
+#ifdef KNOWHERE_WITH_DNNL
+    }
+#endif
+
     auto res = GenResultDataSet(nq, cfg.k.value(), std::move(labels), std::move(distances));
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
@@ -189,8 +213,13 @@ template <typename DataType>
 Status
 BruteForce::SearchWithBuf(const DataSetPtr base_dataset, const DataSetPtr query_dataset, int64_t* ids, float* dis,
                           const Json& config, const BitsetView& bitset) {
+#ifdef KNOWHERE_WITH_DNNL
+	DataSetPtr base(base_dataset);
+    DataSetPtr query(query_dataset);
+#else
     auto base = ConvertFromDataTypeIfNeeded<DataType>(base_dataset);
     auto query = ConvertFromDataTypeIfNeeded<DataType>(query_dataset);
+#endif
 
     auto xb = base->GetTensor();
     auto nb = base->GetRows();
@@ -227,6 +256,18 @@ BruteForce::SearchWithBuf(const DataSetPtr base_dataset, const DataSetPtr query_
     auto labels = ids;
     auto distances = dis;
 
+#ifdef KNOWHERE_WITH_DNNL
+    if (faiss::is_dnnl_enabled() && (faiss_metric_type == faiss::METRIC_INNER_PRODUCT) && (is_cosine == false)) {
+        BitsetViewIDSelector bw_idselector(bitset);
+        faiss::IDSelector* id_selector = (bitset.empty()) ? nullptr : &bw_idselector;
+
+        faiss::float_minheap_array_t buf{(size_t)nq, (size_t)topk, labels, distances};
+        if (std::is_same_v<DataType, knowhere::bf16>)
+            faiss::knn_inner_product_bf16((const uint16_t*)xq, (const uint16_t*)xb, dim, nq, nb, &buf, id_selector);
+        else
+            faiss::knn_inner_product((const float*)xq, (const float*)xb, dim, nq, nb, &buf, id_selector);
+    } else {
+#endif
     auto pool = ThreadPool::GetGlobalSearchThreadPool();
     std::vector<folly::Future<Status>> futs;
     futs.reserve(nq);
@@ -291,6 +332,9 @@ BruteForce::SearchWithBuf(const DataSetPtr base_dataset, const DataSetPtr query_
         }));
     }
     RETURN_IF_ERROR(WaitAllSuccess(futs));
+#ifdef KNOWHERE_WITH_DNNL
+    }
+#endif
 
 #if defined(NOT_COMPILE_FOR_SWIG) && !defined(KNOWHERE_WITH_LIGHT)
     if (cfg.trace_id.has_value()) {
@@ -310,10 +354,13 @@ BruteForce::RangeSearch(const DataSetPtr base_dataset, const DataSetPtr query_da
     DataSetPtr base(base_dataset);
     DataSetPtr query(query_dataset);
     bool is_sparse = std::is_same<DataType, knowhere::sparse::SparseRow<float>>::value;
+#ifndef KNOWHERE_WITH_DNNL
     if (!is_sparse) {
         base = ConvertFromDataTypeIfNeeded<DataType>(base_dataset);
         query = ConvertFromDataTypeIfNeeded<DataType>(query_dataset);
     }
+#endif
+
     auto xb = base->GetTensor();
     auto nb = base->GetRows();
     auto dim = base->GetDim();
@@ -374,6 +421,61 @@ BruteForce::RangeSearch(const DataSetPtr base_dataset, const DataSetPtr query_da
     std::vector<std::vector<int64_t>> result_id_array(nq);
     std::vector<std::vector<float>> result_dist_array(nq);
 
+#ifdef KNOWHERE_WITH_DNNL
+    if (faiss::is_dnnl_enabled() && (faiss_metric_type == faiss::METRIC_INNER_PRODUCT) && (is_cosine == false)) {
+        if (is_sparse) {
+            std::vector<folly::Future<Status>> futs;
+            futs.reserve(nq);
+            for (int i = 0; i < nq; ++i) {
+                futs.emplace_back(pool->push([&, index = i] {
+                    auto cur_query = (const sparse::SparseRow<float>*)xq + index;
+                    auto xb_sparse = (const sparse::SparseRow<float>*)xb;
+                    for (int j = 0; j < nb; ++j) {
+                        if (!bitset.empty() && bitset.test(j)) {
+                            continue;
+                        }
+                        auto dist = cur_query->dot(xb_sparse[j]);
+                        if (dist > radius && dist <= range_filter) {
+                            result_id_array[index].push_back(j);
+                            result_dist_array[index].push_back(dist);
+                        }
+                    }
+                    return Status::success;
+                }));
+            }
+            auto ret = WaitAllSuccess(futs);
+            if (ret != Status::success) {
+                return expected<DataSetPtr>::Err(ret, "failed to brute force search");
+            }
+        } else {
+            faiss::RangeSearchResult res(nq);
+
+            BitsetViewIDSelector bw_idselector(bitset);
+            faiss::IDSelector* id_selector = (bitset.empty()) ? nullptr : &bw_idselector;
+
+            if (std::is_same_v<DataType, knowhere::bf16>)
+                faiss::range_search_inner_product_bf16((const uint16_t*)xq, (const uint16_t*)xb, dim, nq, nb,
+						                                radius, &res, id_selector);
+            else
+                faiss::range_search_inner_product((const float*)xq, (const float*)xb, dim, nq, nb, radius,
+						                                &res, id_selector);
+
+            for (int i = 0; i < nq; ++i) {
+                auto elem_cnt = res.lims[nq];
+                result_dist_array[i].resize(elem_cnt);
+                result_id_array[i].resize(elem_cnt);
+                for (int j = 0; j < elem_cnt; j++) {
+                    result_dist_array[i][j] = res.distances[j];
+                    result_id_array[i][j] = res.labels[j];
+                }
+                if (cfg.range_filter.value() != defaultRangeFilter) {
+                    FilterRangeSearchResultForOneNq(result_dist_array[i], result_id_array[i], is_ip, radius,
+							                        range_filter);
+                }
+            }
+        }
+    } else {
+#endif
     std::vector<folly::Future<Status>> futs;
     futs.reserve(nq);
     for (int i = 0; i < nq; ++i) {
@@ -463,6 +565,9 @@ BruteForce::RangeSearch(const DataSetPtr base_dataset, const DataSetPtr query_da
     if (ret != Status::success) {
         return expected<DataSetPtr>::Err(ret, "failed to brute force search");
     }
+#ifdef KNOWHERE_WITH_DNNL
+    }
+#endif
 
     auto range_search_result =
         GetRangeSearchResult(result_dist_array, result_id_array, is_ip || is_bm25, nq, radius, range_filter);
